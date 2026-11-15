@@ -1,4 +1,4 @@
-# Free LLM Install Expert
+# WorkBuddy Free LLM Install & Entry Optimization
 
 A cross-platform toolkit that turns a pool of free LLM endpoints into one stable,
 auto-failover "total entry" model for WorkBuddy (and any Ollama / OpenAI-compatible client).
