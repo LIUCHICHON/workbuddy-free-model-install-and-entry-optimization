@@ -1,0 +1,22 @@
+# 含密钥的运行期配置 —— 绝不提交
+settings.json
+rescue-providers.json
+models.json
+.env
+*.key
+
+# 运行期产物
+logs/
+health.json
+health.log
+lanes.json
+metrics.json
+bridge-metrics.json
+service.lock
+catalog.json
+
+# 本机临时/备份
+*.bak
+*.bak-*
+.DS_Store
+node_modules/

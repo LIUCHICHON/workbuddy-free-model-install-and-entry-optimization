@@ -1,0 +1,10 @@
+# 通用换行策略：源码与脚本 LF，Windows 批处理/PowerShell CRLF
+* text=auto eol=lf
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.plist.example text eol=lf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf

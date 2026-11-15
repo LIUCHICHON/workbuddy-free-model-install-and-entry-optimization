@@ -1,0 +1,29 @@
+{
+  "_comment": "救援通道配置示例（脱敏）。复制为 rescue-providers.json 并把 apiKey 换成真实密钥。真实文件含密钥，权限应为 600，禁止提交到 git / 分享给他人。顺序即优先级：数组第一个最先尝试（当前：agnes → sensenova → glm-4-flash）。",
+  "enabled": true,
+  "onlyForCombos": false,
+  "timeoutMs": 60000,
+  "providers": [
+    {
+      "id": "agnes-2.5-flash",
+      "name": "外部直连·首选（示例）",
+      "baseUrl": "https://api.example-b.com/v1",
+      "apiKey": "sk-REPLACE-ME",
+      "model": "agnes-2.5-flash"
+    },
+    {
+      "id": "sensenova-6.8-flash-lite",
+      "name": "外部直连·次选（示例）",
+      "baseUrl": "https://api.example-a.com/v1",
+      "apiKey": "sk-REPLACE-ME",
+      "model": "sensenova-6.8-flash-lite"
+    },
+    {
+      "id": "glm-4-flash",
+      "name": "外部直连·慢速兜底（示例，固定排最后）",
+      "baseUrl": "https://api.example-c.com/v1",
+      "apiKey": "sk-REPLACE-ME",
+      "model": "glm-4-flash"
+    }
+  ]
+}

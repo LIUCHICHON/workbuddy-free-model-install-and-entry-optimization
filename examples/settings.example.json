@@ -1,0 +1,14 @@
+{
+  "_comment": "首次部署请复制为 %USERPROFILE%\\.our-free-model\\settings.json 并填写真实值。含密钥文件权限应仅本人可读，勿提交 git / 勿分享。",
+  "forwardKey": "请填写你的-forwardKey（桥访问 standalone 用）",
+  "managementKey": "请填写你的-managementKey（可选）",
+  "standalonePort": 18900,
+  "combos": [
+    {
+      "id": "combo:auto",
+      "name": "⓪ 总入口（轮询双通道·抗 429）",
+      "strategy": "round-robin",
+      "models": []
+    }
+  ]
+}
