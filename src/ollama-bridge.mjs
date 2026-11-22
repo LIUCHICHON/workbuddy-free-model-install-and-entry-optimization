@@ -30,7 +30,11 @@ const HOST = process.env.OFM_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.OFM_BRIDGE_PORT || 11435);
 const UPSTREAM = (process.env.OFM_UPSTREAM || 'http://127.0.0.1:18900/v1').replace(/\/+$/, '');
 const LOCAL = (process.env.OFM_LOCAL_OLLAMA || 'http://127.0.0.1:11434').replace(/\/+$/, '');
-const SETTINGS = process.env.OFM_SETTINGS || join(homedir(), '.our-free-model', 'settings.json');
+// 数据目录优先级：OFM_SETTINGS（精确指定 settings 文件） > OFM_HOME / OFM_DATA_DIR（目录） > 默认 ~/.our-free-model
+// 注意：OFM_HOME 之前只有 setup-auto-entry.mjs 认，桥不认，导致「配了 OFM_HOME 但桥仍读默认路径」的错位。
+// 这里统一口径，Windows/Mac 安装包只需设 OFM_HOME 即可全链路生效。
+const OFM_DIR = (process.env.OFM_HOME || process.env.OFM_DATA_DIR || join(homedir(), '.our-free-model')).replace(/\/+$/, '');
+const SETTINGS = process.env.OFM_SETTINGS || join(OFM_DIR, 'settings.json');
 
 /** 模型管理类端点一律交给真 Ollama，避免默认指向桥时 pull/rm/create 报 404 */
 const LOCAL_MANAGE = new Set([
@@ -82,13 +86,13 @@ function isRetryableStatus(code) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // 跨通道兜底池：与 combo 成员互不重叠的独立模型，作为成员级重试的补充。
+// 注意（2026-11-22）：dots-studio/dots-3-note-preview:free 与 cohere/north-mini-code:free
+// 已被上游下线（404 model not found），已移出此池。
 const CROSS_CHANNEL_POOL = [
   'kilo-auto/free',
   'nvidia/nemotron-3.5-lightning:free',
   'nvidia/nemotron-3.5-super-vl:free',
-  'cohere/north-mini-code:free',
   'baidu/ernie-5.5-flash-preview:free',
-  'dots-studio/dots-3-note-preview:free',
   'particle-ai/particle-1:free',
 ];
 
@@ -100,7 +104,7 @@ const laneOf = (model = '') => (KILO_LANE_PREFIX.test(model) ? 'kilo' : 'opencod
 const LANE_LABEL = { opencode: 'OpenCode', kilo: 'Kilo', rescue: '外部救援' };
 
 // ---------- 持久化状态 ----------
-const DATA_DIR = join(homedir(), '.our-free-model');
+const DATA_DIR = OFM_DIR;
 const LANE_FILE = process.env.OFM_LANE_STATE || join(DATA_DIR, 'bridge-lanes.json');
 const RESCUE_FILE = process.env.OFM_RESCUE_CONFIG || join(DATA_DIR, 'rescue-providers.json');
 const METRICS_FILE = process.env.OFM_METRICS_FILE || join(DATA_DIR, 'bridge-metrics.json');
@@ -116,6 +120,7 @@ let metrics = (() => {
     failures: 0,            // 全员失败（返回了 ALL_FREE_LANES_EXHAUSTED）
     emptyReplies: 0,        // 空正文守卫命中次数（已自动换成员）
     truncations: 0,         // 救援通道截断换道次数
+    deadMembers: 0,         // 成员级「模型已被上游下线」(404) 命中次数（已自动跳过并拉黑）
     sources: {},            // member:x / rescue:x / none 各多少次
     laneCloses: { opencode: 0, kilo: 0 },
     latencyMs: { count: 0, sum: 0, max: 0 },
@@ -217,6 +222,53 @@ const memberCool = new Map();
 const memberCooling = (m) => (memberCool.get(m) || 0) > Date.now();
 const coolMember = (m, ms) => memberCool.set(m, Date.now() + Math.max(5_000, ms));
 
+// ---------- 死亡成员黑名单：上游已下线的模型 id，持久化 ----------
+// 真实故障（2026-11-22）：上游把 glm-5.3-flash-free / dots-studio/dots-3-note-preview:free /
+// cohere/north-mini-code:free 三个 id 下线了，回「model not found」(404)。
+// 若不记住，每次请求都会再撞一次 404（combo 轮询会反复把它排到第一位），复现率 30%。
+// 这里把「确认已下线」的 id 写进 bridge-dead-members.json，进程重启也不忘。
+// 存活 24 小时后自动放行一次探测——上游可能把模型加回来。
+const DEAD_FILE = process.env.OFM_DEAD_MEMBERS || join(DATA_DIR, 'bridge-dead-members.json');
+const DEAD_TTL_MS = 24 * 60 * 60 * 1000;
+let deadMembers = (() => {
+  try {
+    const j = JSON.parse(readFileSync(DEAD_FILE, 'utf8')) || {};
+    const now = Date.now();
+    const out = {};
+    for (const [k, v] of Object.entries(j)) {
+      const at = Number(v?.at) || 0;
+      if (now - at < DEAD_TTL_MS) out[k] = { at, reason: String(v?.reason || '') };
+    }
+    return out;
+  } catch { return {}; }
+})();
+let deadSaveTimer = null;
+function saveDeadMembers() {
+  if (deadSaveTimer) return;
+  deadSaveTimer = setTimeout(() => {
+    deadSaveTimer = null;
+    try {
+      mkdirSync(DATA_DIR, { recursive: true });
+      writeFileSync(DEAD_FILE, JSON.stringify(deadMembers, null, 2));
+      try { chmodSync(DEAD_FILE, 0o600); } catch { /* 某些文件系统不支持 */ }
+    } catch { /* 落盘失败不影响主流程 */ }
+  }, 200);
+  if (deadSaveTimer.unref) deadSaveTimer.unref();
+}
+function flushDeadMembers() {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(DEAD_FILE, JSON.stringify(deadMembers, null, 2));
+    try { chmodSync(DEAD_FILE, 0o600); } catch { /* 某些文件系统不支持 */ }
+  } catch { /* 落盘失败不影响主流程 */ }
+}
+const isDeadMember = (m) => !!deadMembers[m];
+function markDeadMember(m, reason) {
+  deadMembers[m] = { at: Date.now(), reason: String(reason || '').slice(0, 200) };
+  saveDeadMembers();
+  saveMetrics();
+}
+
 // 组合成员清单（跟随 settings.json 变更自动刷新）
 let comboCache = { mtime: 0, map: new Map() };
 function loadCombos() {
@@ -300,19 +352,61 @@ async function isEmptyReply(resp) {
   }
 }
 
+/**
+ * 把 JSON 字符串片段里的转义还原成可读文本。
+ * 上游 404 报文形如：model \"dots-studio\/dots-3-note-preview:free\" not found
+ * 直接存盘会看到一堆反斜杠，这里逐项还原（只处理安全的转义序列）。
+ */
+function unescapeJsonString(s) {
+  return String(s || '')
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\\//g, '/')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\\\/g, '\\');
+}
+
+/**
+ * 成员级「模型已不存在」判定。
+ * 上游把下线/改名的模型直接以 404（有时 400/422）回「model "xxx" not found」，
+ * 这是**该成员永久失效**，与通道限额（429）性质完全不同：
+ *   · 429 → 通道级问题，关闸 + 走其他通道
+ *   · 404 → 成员级问题，只跳过并冷却该成员，不能因此中断整个 combo 请求。
+ * 真实故障（2026-11-22）：glm-5.3-flash-free / dots-studio/dots-3-note-preview:free /
+ * cohere/north-mini-code:free 三个 id 被上游下线，combo:auto 命中它们时整个请求
+ * 直接把 404 抛给 WorkBuddy（复现率 30%），而后面还有 5 个正常成员根本没轮到。
+ */
+function isModelGone(resp, bodyText) {
+  const code = resp?.status;
+  if (code !== 404 && code !== 400 && code !== 422) return false;
+  const t = String(bodyText || '').toLowerCase();
+  return /not\s*found|does\s*not\s*exist|no\s*such\s*model|unknown\s*model|model_not_found|deprecated|not\s*available/.test(t);
+}
+
 /** 分类一次失败：是否可重试、属于哪个通道、恢复时间、原因文案。 */
 async function classify(resp) {
-  const out = { retryable: false, lane: null, retryAt: 0, reason: '', empty: false };
+  const out = { retryable: false, lane: null, retryAt: 0, reason: '', empty: false, dead: false };
   if (resp.ok) {
     out.empty = await isEmptyReply(resp);
     out.retryable = out.empty;
     if (out.empty) out.reason = '空正文（推理 token 烧光预算）';
     return out;
   }
+  // 先读一次报文体（404 判定需要），随后 classify 内部可能再次 clone 读取，互不影响。
+  let bodyText = '';
+  try { bodyText = await resp.clone().text(); } catch { /* 忽略读取失败 */ }
+  // 成员级「模型不存在」：可跳过重试，但不关通道。
+  if (isModelGone(resp, bodyText)) {
+    out.retryable = true;
+    out.dead = true;
+    const mm = /"message"\s*:\s*"((?:[^"\\]|\\.){0,200})/.exec(bodyText);
+    out.reason = unescapeJsonString(mm ? mm[1] : `HTTP ${resp.status}`);
+    return out;
+  }
   if (!isRetryableStatus(resp.status)) return out;
   out.retryable = true;
-  let text = '';
-  try { text = await resp.clone().text(); } catch { /* 忽略读取失败 */ }
+  let text = bodyText;
   const m = /retry after ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)/i.exec(text);
   if (m) {
     const t = Date.parse(m[1]);
@@ -320,13 +414,13 @@ async function classify(resp) {
   }
   if (/OpenCode free quota/i.test(text)) out.lane = 'opencode';
   else if (/Sign up for free to continue/i.test(text)) out.lane = 'kilo';
-  const mm = /"message"\s*:\s*"([^"]{0,200})/.exec(text);
-  out.reason = (mm ? mm[1] : `HTTP ${resp.status}`).replace(/\\+"/g, '"');
+  const mm = /"message"\s*:\s*"((?:[^"\\]|\\.){0,200})/.exec(text);
+  out.reason = unescapeJsonString(mm ? mm[1] : `HTTP ${resp.status}`);
   return out;
 }
 
 /** 全员失败时的可读错误（含各通道恢复时间），不再把上游原始 JSON 甩给用户。 */
-function quotaExhaustedResponse(lastDetail) {
+function quotaExhaustedResponse(lastDetail, extraNote = '') {
   const closed = [];
   for (const lane of ['opencode', 'kilo']) {
     const info = laneInfo(lane);
@@ -342,7 +436,7 @@ function quotaExhaustedResponse(lastDetail) {
     : '总入口暂时无可用通道（上游免费模型整体限流）';
   return new Response(JSON.stringify({
     error: {
-      message: `${head}，外部救援通道也未成功，请稍后重试。`,
+      message: `${head}，外部救援通道也未成功，请稍后重试。${extraNote}`,
       type: 'rate_limit_error',
       code: 'ALL_FREE_LANES_EXHAUSTED',
       lanes: { opencode: laneInfo('opencode'), kilo: laneInfo('kilo') },
@@ -524,11 +618,19 @@ async function chatWithFallback(payload, opts = {}) {
   const combos = loadCombos();
   const isCombo = combos.has(wanted);
 
-  // 候选清单：只保留「通道开闸 + 成员不在冷却」的；combo 用轮询起点保证负载分散。
+  // 候选清单：只保留「通道开闸 + 成员不在冷却 + 成员未被上游下线 + 上游清单里仍存在」的；
+  // combo 用轮询起点保证负载分散。
+  //
+  // 为什么要查上游清单（2026-11-22）：settings.json 的 combos 是**历史快照**，
+  // 上游把模型下线后快照不会自动更新，导致桥反复往死 id 上打（404）。
+  // 实时清单 + 404 黑名单双保险，保证「下线即停用」。
+  const upstreamIds = await freeModels();
+  const upstreamAlive = upstreamIds.length ? new Set(upstreamIds) : null;
   let candidates = [];
   if (isCombo) {
     const members = combos.get(wanted) || [];
-    const live = members.filter((m) => laneOpen(laneOf(m)) && !memberCooling(m));
+    const live = members.filter((m) => laneOpen(laneOf(m)) && !memberCooling(m) && !isDeadMember(m)
+      && (!upstreamAlive || upstreamAlive.has(m)));
     if (live.length > 1) {
       const k = rrCursor++ % live.length;
       candidates = [...live.slice(k), ...live.slice(0, k)];
@@ -538,12 +640,14 @@ async function chatWithFallback(payload, opts = {}) {
   } else {
     candidates = [wanted];
     for (const m of CROSS_CHANNEL_POOL) {
-      if (m !== wanted && laneOpen(laneOf(m)) && !memberCooling(m)) candidates.push(m);
+      if (m !== wanted && laneOpen(laneOf(m)) && !memberCooling(m) && !isDeadMember(m)
+        && (!upstreamAlive || upstreamAlive.has(m))) candidates.push(m);
     }
   }
 
   let lastDetail = null;
   const closedNow = new Set();   // 本轮已判定关闸的通道，后面的同通道成员直接跳过（冷启动由 14 次尝试降到 2 次）
+  const deadThisRound = [];      // 本轮确认被上游下线的成员（404 model not found）
 
   for (const m of candidates) {
     if (signal?.aborted) break;
@@ -552,8 +656,18 @@ async function chatWithFallback(payload, opts = {}) {
     const t0 = Date.now();
     const resp = await attempt(payload, { ...opts, model: m });
     const cls = await classify(resp);
-    dbg('成员尝试', m, `status=${resp.status} retryable=${cls.retryable}${cls.empty ? ' 空正文' : ''} ${Date.now() - t0}ms`);
+    dbg('成员尝试', m, `status=${resp.status} retryable=${cls.retryable}${cls.empty ? ' 空正文' : ''}${cls.dead ? ' 已下线' : ''} ${Date.now() - t0}ms`);
     if (cls.empty) { metrics.emptyReplies += 1; saveMetrics(); }
+    // 成员级「模型已被上游下线」(404 model not found)：跳过该成员继续试下一个，
+    // 并把它拉进持久化黑名单（24h 后自动放行探测），**绝不把 404 直接抛给用户**。
+    if (cls.dead) {
+      metrics.deadMembers = (metrics.deadMembers || 0) + 1;
+      markDeadMember(m, cls.reason);
+      deadThisRound.push(m);
+      lastDetail = { model: m, status: resp.status, reason: cls.reason };
+      resp.body?.cancel?.().catch?.(() => {});
+      continue;
+    }
     if (!cls.retryable) {
       openLane(laneOf(m));
       memberCool.delete(m);
@@ -574,7 +688,11 @@ async function chatWithFallback(payload, opts = {}) {
   const rescued = await tryRescue(payload, opts);
   if (rescued) return finish(rescued);
 
-  return finish({ resp: quotaExhaustedResponse(lastDetail), source: 'none' });
+  // 连救援都不行：给出可读错误。若本轮有成员是被下线（404），明确告诉用户是哪些 id 失效了。
+  const deadNote = deadThisRound.length
+    ? `已下线的模型 id：${deadThisRound.join('、')}。`
+    : '';
+  return finish({ resp: quotaExhaustedResponse(lastDetail, deadNote), source: 'none' });
 }
 
 let cache = { ts: 0, ids: [] };
@@ -862,6 +980,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         metrics: metricsSnapshot(),
         lanes: { opencode: laneInfo('opencode'), kilo: laneInfo('kilo') },
+        deadMembers: Object.entries(deadMembers).map(([id, v]) => ({
+          id,
+          at: new Date(v.at).toISOString(),
+          reason: v.reason,
+        })),
         rescueCooling: [...rescueCool.entries()]
           .filter(([, until]) => until > Date.now())
           .map(([id, until]) => ({ id, until: new Date(until).toISOString() })),
@@ -872,8 +995,17 @@ const server = http.createServer(async (req, res) => {
       laneState = {};
       memberCool.clear();
       rescueCool.clear();
+      rrCursor = 0;            // 轮询游标一并归零，让下次从首个成员开始（便于复现特定成员）
       flushLaneState();
       return json(res, 200, { ok: true, lanes: { opencode: laneInfo('opencode'), kilo: laneInfo('kilo') } });
+    }
+    // POST /admin/reset-dead-members：清空「上游已下线模型」黑名单
+    // （上游可能把模型加回来，清空后桥会重新探测它们）
+    if (path === '/admin/reset-dead-members' && req.method === 'POST') {
+      const n = Object.keys(deadMembers).length;
+      deadMembers = {};
+      flushDeadMembers();
+      return json(res, 200, { ok: true, cleared: n });
     }
     if (path === '/api/version') {
       const v = await localJson('/api/version');
@@ -932,6 +1064,7 @@ server.listen(PORT, HOST, () => {
 function flushAndExit() {
   flushLaneState();
   flushMetrics();
+  flushDeadMembers();
   process.exit(0);
 }
 process.on('SIGTERM', flushAndExit);
