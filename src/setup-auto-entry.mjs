@@ -76,6 +76,19 @@ const upstream = (process.env.OFM_UPSTREAM || `http://127.0.0.1:${standalonePort
 // 且已知不稳定的 ling-3.2 / lfm-3-1.7b 排除。
 const UNSTABLE = ['inclusionai/ling-3.2-flash:free', 'liquid/lfm-3-1.7b:free'];
 
+// 上游已下线的模型 id（2026-11-22 实测确认，404 model not found）。
+// 这些 id 必须排除，否则重跑 --wb 会把死 id 写回 models.json，桥每次轮询都会撞一次 404。
+const GONE = [
+  'glm-5.3-flash-free',
+  'dots-studio/dots-3-note-preview:free',
+  'cohere/north-mini-code:free',
+  'minimax-m3.1-flash-free',
+  'inkling-2-small-free',
+];
+
+// 统一排除集：临时不稳定 + 已被上游下线。两类都不该进池。
+const EXCLUDE = [...new Set([...UNSTABLE, ...GONE])];
+
 // 救援通道优先级（用户指定，2026-11-14）：sensenova → glm-4-flash。
 // 备注：agnes 不做实名认证，每次都 429 → 已移除；glm-4-flash 只有 ~18 tok/s、长请求还会 500，固定排最后。
 const RESCUE_RANK = { 'sensenova-6.8-flash-lite': 0, 'glm-4-flash': 1 };
@@ -98,7 +111,7 @@ try {
   const kiloRows = cat.kiloRows || [];
   kiloIds = kiloRows
     .map(m => m.id)
-    .filter(id => !UNSTABLE.includes(id));
+    .filter(id => !EXCLUDE.includes(id));
 } catch { /* 无 catalog 时用内置兜底池 */ }
 
 const FALLBACK_KILO = [
@@ -113,15 +126,15 @@ const kiloPool = kiloIds.length ? kiloIds : FALLBACK_KILO;
 let openIds = [];
 try {
   const cat = JSON.parse(readFileSync(catalogPath, 'utf8'));
-  openIds = (cat.entries || []).filter(id => !UNSTABLE.includes(id));
+  openIds = (cat.entries || []).filter(id => !EXCLUDE.includes(id));
 } catch { /* ignore */ }
-const PREFERRED_OPEN = ['deepseek-v4.1-flash-free', 'glm-5.3-flash-free', 'mimo-v2.6-flash-free', 'longcat-2.5-free'];
+const PREFERRED_OPEN = ['deepseek-v4.1-flash-free', 'mimo-v2.6-flash-free', 'longcat-2.5-free'];
 // 跨设备修正：PREFERRED 只是"优先级"，不代表本机 catalog 一定提供。
 // 有 catalog 时取交集（避免在新设备上选到根本不存在的模型），没有 catalog 时才原样使用。
 const preferredAvailable = openIds.length
   ? PREFERRED_OPEN.filter(id => openIds.includes(id))
   : PREFERRED_OPEN;
-const openPool = [...new Set([...preferredAvailable, ...openIds])].filter(id => !UNSTABLE.includes(id));
+const openPool = [...new Set([...preferredAvailable, ...openIds])].filter(id => !EXCLUDE.includes(id));
 
 // 组装成员：OpenCode 优质在前，kilo 兜底在后（round-robin 在双通道间轮询分散；桥再兜通道级 429）
 const members = [...openPool.slice(0, 6), ...kiloPool.slice(0, 8)];
@@ -181,7 +194,7 @@ async function login() {
 async function probeUpstreamModels() {
   try {
     const r = await fetch(`${upstream}/models`, {
-      headers: { authorization: `Bearer ${forwardKey || 'REPLACE_WITH_YOUR_FORWARD_KEY'}` },
+      headers: { authorization: `Bearer ${forwardKey || 'ollama-bridge-free'}` },
     });
     if (!r.ok) return null;
     const j = await r.json();
@@ -195,18 +208,18 @@ function planWorkBuddy(wb, upstreamIds, port) {
   const bridgePrefix = `http://127.0.0.1:${port}`;
   const byId = new Map(wb.filter(m => m && m.id).map(m => [m.id, m]));
   const ref = wb.find(m => (m.url || '').startsWith(bridgePrefix)) || wb[0] || {};
-  const apiKey = ref.apiKey || 'REPLACE_WITH_YOUR_FORWARD_KEY';
+  const apiKey = ref.apiKey || 'ollama-bridge-free';
 
   // 可用的桥内模型：优先用上游真实清单；探测失败则沿用现有桥内条目
   const internalIds = upstreamIds
-    ? upstreamIds.filter(id => !UNSTABLE.includes(id) || byId.has(id))
+    ? upstreamIds.filter(id => !EXCLUDE.includes(id) || byId.has(id))
     : [...byId.keys()].filter(id => (byId.get(id).url || '').startsWith(bridgePrefix));
 
   const comboIds = COMBO_ORDER.filter(id => internalIds.includes(id));
   const wbIndex = new Map([...byId.keys()].map((id, i) => [id, i]));
   const rankOf = (id) => {
     const n = (byId.get(id) || {}).name || '';
-    if (UNSTABLE.includes(id) || n.startsWith('[暂不可用]')) return 9;
+    if (EXCLUDE.includes(id) || n.startsWith('[暂不可用]')) return 9;
     if (n.startsWith('★')) return 0;
     if (n.startsWith('备')) return 1;
     return id.includes('/') ? 3 : 2; // 新条目：OpenCode 组在前，kilo 组在后
