@@ -11,6 +11,10 @@
  *   R6 流式透传：SSE 帧完整、model 改写正确
  *   R7 指标计数：/metrics 的 requests/sources 与实际一致
  *   R8 --wb --dry 幂等：新增 0 / 移除 0（仅在本机真实环境跑，SKIP_REAL=1 可跳过）
+ *   R9 成员级 404（上游把模型下线）：跳过该成员继续试下一个，404 不冒泡给用户，
+ *      并写入持久化黑名单 + /metrics 暴露 + 清除端点可用
+ *      （真实故障 2026-11-22：combo:auto 命中已下线 id 时整个请求 404 中断，复现率 30%）
+ *   R10 黑名单清除端点 /admin/reset-dead-members
  *
  * 用法：node tests/run-regression.mjs          # 全部（含真实环境冒烟 R8）
  *       SKIP_REAL=1 node tests/run-regression.mjs   # 只跑隔离的受控测试 R1–R7
@@ -25,7 +29,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BRIDGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const BRIDGE = join(BRIDGE_DIR, 'src', 'ollama-bridge.mjs');
+const BRIDGE = join(BRIDGE_DIR, 'ollama-bridge.mjs');
 const SKIP_REAL = process.env.SKIP_REAL === '1';
 
 let passed = 0, failed = 0;
@@ -36,8 +40,10 @@ const ok = (cond, name, extra = '') => {
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- 受控环境：假上游 + 假救援 ----------
-// mode: 'all429' 全部 429 | 'empty' 空正文 | 'ok' 正常
+// mode: 'all429' 全部 429 | 'empty' 空正文 | 'ok' 正常 | 'dead404' 指定成员 404（模型已下线）
 let upstreamMode = 'all429';
+// 这些 id 在 'dead404' 模式下回 404 model not found（模拟上游把模型下线）
+const DEAD_IDS = new Set(['oc-a-free', 'kilo/k-a:free']);
 const upstream = http.createServer((req, res) => {
   if (req.url.startsWith('/__mode')) {
     upstreamMode = new URL(req.url, 'http://x').searchParams.get('mode');
@@ -49,9 +55,22 @@ const upstream = http.createServer((req, res) => {
     return;
   }
   // /v1/chat/completions：不关心请求体，直接按 mode 返回
-  req.resume();
+  let raw = '';
+  req.on('data', (c) => (raw += c));
   req.on('end', () => {
     res.setHeader('Content-Type', 'application/json');
+    if (upstreamMode === 'dead404') {
+      // 按请求体里的 model 决定是 404（已下线）还是 200（正常）
+      let mid = '';
+      try { mid = JSON.parse(raw || '{}').model || ''; } catch { /* ignore */ }
+      if (DEAD_IDS.has(mid)) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: { message: `model "${mid}" not found`, type: 'invalid_request_error' } }));
+        return;
+      }
+      res.end(JSON.stringify({ id: 'x', model: mid, choices: [{ index: 0, message: { role: 'assistant', content: '存活成员出字' }, finish_reason: 'stop' }], usage: { completion_tokens: 4 } }));
+      return;
+    }
     if (upstreamMode === 'all429') {
       res.statusCode = 429;
       res.end(JSON.stringify({ error: { message: 'the OpenCode free quota window is open on this egress: Free usage limit reached. retry after 2099-01-01T00:00:00.000Z', type: 'rate_limit_error' } }));
@@ -62,6 +81,8 @@ const upstream = http.createServer((req, res) => {
     }
   });
 });
+// 收集请求体（dead404 模式需要按 model 判定）
+upstream.on('request', () => { /* 占位 */ });
 
 // 假救援：①截断 ②完整（支持流式）
 const rescues = [
@@ -121,6 +142,7 @@ async function restartBridge() {
       ...process.env,
       OFM_BRIDGE_PORT: String(BPORT),
       OFM_UPSTREAM: `http://127.0.0.1:${upstream.address().port}/v1`,
+      OFM_HOME: tmp,                       // 数据目录（状态/指标/黑名单都落这里，不污染真实环境）
       OFM_SETTINGS: join(tmp, 'settings.json'),
       OFM_LANE_STATE: join(tmp, 'lanes.json'),
       OFM_RESCUE_CONFIG: join(tmp, 'rescue.json'),
@@ -214,6 +236,33 @@ async function main() {
   for (let i = 0; i < 10 && !metricsFlushed; i++) { await wait(200); metricsFlushed = existsSync(join(tmp, 'metrics.json')); }
   ok(metricsFlushed, 'R7b 指标已持久化到文件');
 
+  // R9 成员级 404（模型被上游下线）：必须跳过该成员继续试下一个，不能把 404 抛给用户
+  // 真实故障（2026-11-22）：combo:auto 命中已下线的 dots-studio/... 时，整个请求直接 404 失败，
+  // 后面 5 个正常成员根本没轮到 —— WorkBuddy 里表现为「总入口无故中断」。
+  await setMode('dead404');
+  await postJson('/admin/reset-lanes');
+  await postJson('/admin/reset-dead-members');
+  r = await callBridge({ model: 'combo:auto', messages: [{ role: 'user', content: 'hi' }], max_tokens: 32, stream: false });
+  ok(r.status === 200 && r.text.includes('存活成员出字'), 'R9a 成员 404 → 自动跳到下一成员出字', `status=${r.status}`);
+  ok(!r.text.includes('not found'), 'R9b 404 未冒泡给用户');
+  const m9 = (await getJson('/metrics')).metrics;
+  ok((m9.deadMembers || 0) >= 1, 'R9c 404 成员被计入 deadMembers', `deadMembers=${m9.deadMembers}`);
+
+  // R9d 黑名单持久化：死 id 落盘，且下次请求不再打它
+  let deadFile = {};
+  for (let i = 0; i < 10; i++) {
+    await wait(150);
+    try { deadFile = JSON.parse(readFileSync(join(tmp, 'bridge-dead-members.json'), 'utf8')); } catch { /* 还没写入 */ }
+    if (Object.keys(deadFile).length) break;
+  }
+  ok(Object.keys(deadFile).length >= 1, 'R9d 下线模型已写入黑名单文件', `黑名单=${Object.keys(deadFile).join(',')}`);
+  const m9b = await getJson('/metrics');
+  ok(Array.isArray(m9b.deadMembers) && m9b.deadMembers.length >= 1, 'R9e /metrics 暴露黑名单');
+
+  // R10 黑名单清除端点可用（上游可能把模型加回来）
+  const cleared = await postJson('/admin/reset-dead-members');
+  ok(cleared?.ok === true && cleared?.cleared >= 1, 'R10 黑名单清除端点可用', `cleared=${cleared?.cleared}`);
+
   if (bridge) bridge.kill();
   upstream.close(); rescueServers.forEach((s) => s.close());
 
@@ -223,7 +272,7 @@ async function main() {
     try {
       const h = await new Promise((res2, rej) => http.get({ host: '127.0.0.1', port: 11_435, path: '/health' }, (x) => { let t = ''; x.on('data', (c) => t += c); x.on('end', () => res2(JSON.parse(t))); }).on('error', rej));
       ok(h.status === 'ok', 'R8a 生产桥健康', `models=${h.models}`);
-      const req = http.request({ host: '127.0.0.1', port: 11_435, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer REPLACE_WITH_YOUR_FORWARD_KEY' } }, (res2) => { let t = ''; res2.on('data', (c) => t += c); res2.on('end', () => {
+      const req = http.request({ host: '127.0.0.1', port: 11_435, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ollama-bridge-free' } }, (res2) => { let t = ''; res2.on('data', (c) => t += c); res2.on('end', () => {
         let j = null; try { j = JSON.parse(t); } catch { /* ignore */ }
         const c = j?.choices?.[0]?.message?.content;
         ok(res2.statusCode === 200 && c && c.trim(), 'R8b combo:auto 出字', `内容=${String(c || '').trim().slice(0, 20)}`);
