@@ -16,7 +16,7 @@ one-click installer — now merged into a single platform-neutral GitHub reposit
 | `examples/` | Config templates with placeholder keys |
 | `docs/` | User guide (Chinese), architecture, macOS/Windows deployment, security |
 | `skills/` | Two WorkBuddy user-level skills distilled from real incidents |
-| `tests/` | 17-case regression suite |
+| `tests/` | Regression suite: 10 scenarios (R1–R10) |
 
 ## Quick start
 

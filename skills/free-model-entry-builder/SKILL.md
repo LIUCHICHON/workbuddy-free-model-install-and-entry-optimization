@@ -115,7 +115,7 @@ node setup-auto-entry.mjs --strategy smart   # 指定策略（fallback/round-rob
 
 ## 验证口诀（完成即验证）
 
-- 一键回归（17 项，含熔断/空正文/截断/救援/指标 + 真实冒烟）：`node <ofm-bridge>/tests/run-regression.mjs`（`SKIP_REAL=1` 只跑受控部分）。
+- 一键回归（10 个场景 R1–R10，含熔断/空正文/截断/救援/指标 + 真实冒烟）：`node <ofm-bridge>/tests/run-regression.mjs`（`SKIP_REAL=1` 只跑受控部分）。
 - `--dry` 探测的路径/端口/成员正确。
 - 正式跑后：`node ofm-combos.mjs get`（或 `GET /routing`）确认 `combo:auto` 成员数符合预期、含双通道。
 - 经桥实测出字：`curl -s http://127.0.0.1:<桥>/v1/chat/completions -H "Authorization: Bearer <key>" -d '{"model":"combo:auto",...}'` 返回 200 出字。

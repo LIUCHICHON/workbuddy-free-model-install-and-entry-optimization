@@ -51,7 +51,7 @@
 ├── examples/                  #   配置模板（密钥均为占位符）
 ├── docs/                      #   中文手册、架构、双平台部署、安全
 ├── skills/                    #   两个 WorkBuddy 用户级 Skill
-└── tests/run-regression.mjs   #   17 项回归
+└── tests/run-regression.mjs   #   10 个场景（R1–R10）回归
 ```
 
 ## 与旧版的文件对应

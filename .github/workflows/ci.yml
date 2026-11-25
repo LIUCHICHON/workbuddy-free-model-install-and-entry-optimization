@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax check (node)
+        run: |
+          for f in src/*.mjs tests/*.mjs; do
+            [ -e "$f" ] || continue
+            node --check "$f"
+          done
+
+      - name: Syntax check (bash)
+        run: |
+          for f in platforms/macos/*.sh; do
+            [ -e "$f" ] || continue
+            bash -n "$f"
+          done
+
+      - name: Regression (isolated, no real network)
+        run: SKIP_REAL=1 node tests/run-regression.mjs

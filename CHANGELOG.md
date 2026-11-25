@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 (2026-11-22)
+
+- 同步桥 v5：成员级 404 自动跳过并写入持久化黑名单，`/metrics` 暴露黑名单状态，新增清除端点 `/admin/reset-dead-members`。
+- 回归测试补 R9（成员级 404）/ R10（黑名单清除），说明更新为 10 个场景（R1–R10）。
+- 修正仓库文档：安全说明中的桥鉴权 key 来源改为与 `src/ollama-bridge.mjs` 一致（`settings.json.forwardKey` / `OFM_API_KEY`）。
+
 ## 1.0.0 (2026-11-15)
 
 - 首个公开版本：把原先彼此独立的 **macOS 工程版** 与 **Windows 一键安装包** 合并为一个跨平台仓库。

@@ -29,7 +29,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BRIDGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const BRIDGE = join(BRIDGE_DIR, 'ollama-bridge.mjs');
+const BRIDGE = join(BRIDGE_DIR, 'src', 'ollama-bridge.mjs');
 const SKIP_REAL = process.env.SKIP_REAL === '1';
 
 let passed = 0, failed = 0;

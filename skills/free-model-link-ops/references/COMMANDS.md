@@ -213,7 +213,7 @@ curl -s http://127.0.0.1:11435/metrics | python3 -m json.tool
 # 一键解除全部熔断与冷却（确认额度恢复后）
 curl -s -X POST http://127.0.0.1:11435/admin/reset-lanes
 
-# 一键回归测试（17 项，受控假上游 + 真实环境冒烟）
+# 一键回归测试（10 个场景 R1–R10，受控假上游 + 真实环境冒烟）
 node $REPO_ROOT/tests/run-regression.mjs
 # 只跑受控部分：SKIP_REAL=1 node .../run-regression.mjs
 ```

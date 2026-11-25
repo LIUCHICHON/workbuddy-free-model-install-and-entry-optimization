@@ -49,5 +49,5 @@ bash platforms/macos/healthcheck.sh
 ```bash
 node src/healthcheck.mjs --models      # 逐个模型探活
 bash platforms/macos/selfcheck.sh      # 并发扫描 + 降级复核（需 OFM_FORWARD_KEY）
-node tests/run-regression.mjs          # 17 项回归
+node tests/run-regression.mjs          # 10 个场景（R1–R10）回归
 ```

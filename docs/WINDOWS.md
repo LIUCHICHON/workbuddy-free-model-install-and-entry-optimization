@@ -32,7 +32,7 @@
 | `src/setup-auto-entry.mjs` | 自动搜索免费模型并同步 WorkBuddy models.json |
 | `examples/settings.example.json` | 配置模板（首次自动复制到数据目录） |
 | `examples/rescue-providers.example.json` | 外部救援通道模板（可选，apiKey 为占位符） |
-| `tests/run-regression.mjs` | 回归测试（17 项） |
+| `tests/run-regression.mjs` | 回归测试（10 个场景 R1–R10） |
 
 ## 环境变量
 

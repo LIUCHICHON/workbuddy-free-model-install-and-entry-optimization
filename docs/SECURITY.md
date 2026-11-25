@@ -4,7 +4,7 @@
 
 | 类型 | 处理 |
 |---|---|
-| 桥鉴权 key | 全部替换为 `REPLACE_WITH_YOUR_FORWARD_KEY`，运行时由 `OFM_FORWARD_KEY` 或 `~/.workbuddy/models.json` 提供 |
+| 桥鉴权 key | 全部替换为 `REPLACE_WITH_YOUR_FORWARD_KEY`，运行时由 `settings.json` 的 `forwardKey` 或环境变量 `OFM_API_KEY` 提供（见 `src/ollama-bridge.mjs`） |
 | 外部救援 apiKey | `examples/rescue-providers.example.json` 内为 `sk-REPLACE-ME` |
 | 真实 `settings.json` / `rescue-providers.json` / `models.json` | **未纳入仓库**，并已加入 `.gitignore` |
 | 本机绝对路径 `/Users/...` | 全部改为 `$REPO_ROOT`、`$HOME`、`__REPO_ROOT__` 占位 |
